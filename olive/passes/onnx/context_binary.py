@@ -154,11 +154,15 @@ class EPContextBinaryGenerator(Pass):
             targets.append(result)
             target_names.append(target_name)
 
+        # Preserve base model path so ModelPackager can include the pre-optimized model
+        parent_attrs = dict(model.model_attributes or {})
+        parent_attrs["base_model_path"] = str(model.model_path)
+
         return MultiTargetModelHandler(
             targets,
             target_names,
             model_path=output_dir,
-            model_attributes=model.model_attributes,
+            model_attributes=parent_attrs,
         )
 
     def _run_single_target(

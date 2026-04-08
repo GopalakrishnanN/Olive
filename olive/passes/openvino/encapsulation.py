@@ -161,11 +161,15 @@ class OpenVINOEncapsulation(Pass):
             targets.append(result)
             target_names.append(target_name)
 
+        # Preserve base model path so ModelPackager can include the pre-optimized model
+        parent_attrs = dict(model.model_attributes or {})
+        parent_attrs["base_model_path"] = str(model.model_path)
+
         return MultiTargetModelHandler(
             targets,
             target_names,
             model_path=output_dir,
-            model_attributes=model.model_attributes,
+            model_attributes=parent_attrs,
         )
 
     def _run_single_target(
@@ -305,12 +309,22 @@ class OpenVINOEncapsulation(Pass):
         # generate the genai_config.json file for GenAI models
         create_genai_config(context_model_output, output_model_path, config)
 
+        # Collect config files (non-model files) for downstream ModelPackager
+        output_path = Path(output_model_path)
+        model_suffixes = {".onnx", ".xml", ".bin"}
+        additional_files = [
+            str(f)
+            for f in sorted(output_path.iterdir())
+            if (f.is_file() and f.suffix not in model_suffixes) or f.is_dir()
+        ]
+
         # Populate model_attributes with context binary metadata so it persists in model_config.json
         context_binary_attrs = {
             **(model.model_attributes or {}),
             "ep": "OpenVINOExecutionProvider",
             "device": str(config.target_device).upper(),
             "sdk_version": ov_version,
+            "additional_files": additional_files,
         }
 
         return ONNXModelHandler(model_path=output_model_path, model_attributes=context_binary_attrs)

@@ -96,12 +96,12 @@ class TestModelPackageCommand:
         assert variants["soc_73"]["constraints"]["architecture"] == "73"
 
         # Check metadata.json in component directory
-        metadata_path = output_dir / "output" / "metadata.json"
+        metadata_path = output_dir / "models" / "output" / "metadata.json"
         assert metadata_path.exists()
 
         # Check files were copied into component dir
-        assert (output_dir / "output" / "soc_60" / "model_ctx.onnx").exists()
-        assert (output_dir / "output" / "soc_73" / "model_ctx.onnx").exists()
+        assert (output_dir / "models" / "output" / "soc_60" / "model_ctx.onnx").exists()
+        assert (output_dir / "models" / "output" / "soc_73" / "model_ctx.onnx").exists()
 
     def test_merge_infer_name_from_dir(self, tmp_path):
         """Test that target name is inferred from directory name when not specified."""
@@ -279,3 +279,107 @@ class TestModelPackageCommand:
             # architecture, ep_compatibility_info should not be present
             assert "architecture" not in v["constraints"]
             assert "ep_compatibility_info" not in v["constraints"]
+
+    def test_merge_ep_compatibility_from_onnx_metadata(self, tmp_path):
+        """ep_compatibility_info is extracted from ONNX model metadata when not in model_attributes."""
+        import onnx
+        from onnx import TensorProto, helper
+
+        for name, ep_compat_value in [
+            ("soc_60", "QNNExecutionProvider;version=0.1.0;soc=60"),
+            ("soc_73", "QNNExecutionProvider;version=0.1.0;soc=73"),
+        ]:
+            source_dir = tmp_path / name
+            source_dir.mkdir(parents=True)
+
+            # Create a real ONNX model with ep_compatibility_info metadata
+            x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+            y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+            node = helper.make_node("Identity", ["X"], ["Y"])
+            graph = helper.make_graph([node], "test", [x], [y])
+            onnx_model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+            onnx.helper.set_model_props(
+                onnx_model,
+                {"ep_compatibility_info.QNNExecutionProvider": ep_compat_value},
+            )
+            onnx.save(onnx_model, str(source_dir / "model_ctx.onnx"))
+
+            model_config = {
+                "type": "ONNXModel",
+                "config": {
+                    "model_path": str(source_dir),
+                    "model_attributes": {"ep": "QNNExecutionProvider", "device": "NPU"},
+                },
+            }
+            with open(source_dir / "model_config.json", "w") as f:
+                json.dump(model_config, f)
+
+        output_dir = tmp_path / "output"
+        self._run_command(
+            [
+                "model-package",
+                "--source",
+                str(tmp_path / "soc_60"),
+                "--source",
+                str(tmp_path / "soc_73"),
+                "-o",
+                str(output_dir),
+            ]
+        )
+
+        with open(output_dir / "manifest.json") as f:
+            manifest = json.load(f)
+
+        variants = manifest["component_models"]["output"]["model_variants"]
+        assert variants["soc_60"]["constraints"]["ep_compatibility_info"] == "QNNExecutionProvider;version=0.1.0;soc=60"
+        assert variants["soc_73"]["constraints"]["ep_compatibility_info"] == "QNNExecutionProvider;version=0.1.0;soc=73"
+
+    def test_merge_copies_config_files_to_configs_dir(self, tmp_path):
+        """All additional_files (genai_config, tokenizer, etc.) are moved to configs/."""
+        for name in ("soc_60", "soc_73"):
+            source_dir = tmp_path / name
+            source_dir.mkdir(parents=True)
+            (source_dir / "model_ctx.onnx").write_text("dummy")
+            (source_dir / "genai_config.json").write_text('{"model": {}}')
+            (source_dir / "chat_template.jinja").write_text("template")
+            (source_dir / "tokenizer.json").write_text("{}")
+
+            model_config = {
+                "type": "ONNXModel",
+                "config": {
+                    "model_path": str(source_dir),
+                    "model_attributes": {
+                        "ep": "QNNExecutionProvider",
+                        "device": "NPU",
+                        "additional_files": [
+                            str(source_dir / "genai_config.json"),
+                            str(source_dir / "chat_template.jinja"),
+                            str(source_dir / "tokenizer.json"),
+                        ],
+                    },
+                },
+            }
+            with open(source_dir / "model_config.json", "w") as f:
+                json.dump(model_config, f)
+
+        output_dir = tmp_path / "output"
+        self._run_command(
+            [
+                "model-package",
+                "--source",
+                str(tmp_path / "soc_60"),
+                "--source",
+                str(tmp_path / "soc_73"),
+                "-o",
+                str(output_dir),
+            ]
+        )
+
+        # Config files should be in configs/
+        assert (output_dir / "configs" / "genai_config.json").exists()
+        assert (output_dir / "configs" / "chat_template.jinja").exists()
+        assert (output_dir / "configs" / "tokenizer.json").exists()
+
+        # Config files should NOT be in variant directories
+        assert not (output_dir / "models" / "output" / "soc_60" / "genai_config.json").exists()
+        assert not (output_dir / "models" / "output" / "soc_73" / "genai_config.json").exists()
